@@ -19,6 +19,8 @@
 
 namespace Doctrine\ORM\Persisters\Entity;
 
+use Doctrine\ORM\Mapping\InsertFormula;
+use Doctrine\Common\Annotations\AnnotationReader;
 use Doctrine\Common\Collections\Criteria;
 use Doctrine\Common\Collections\Expr\Comparison;
 use Doctrine\Common\Util\ClassUtils;
@@ -197,6 +199,11 @@ class BasicEntityPersister implements EntityPersister
     private $noLimitsContext;
 
     /**
+     * @var AnnotationReader
+     */
+    private $annotationReader;
+
+    /**
      * Initializes a new <tt>BasicEntityPersister</tt> that uses the given EntityManager
      * and persists instances of the class described by the given ClassMetadata descriptor.
      *
@@ -208,6 +215,7 @@ class BasicEntityPersister implements EntityPersister
         $this->em                    = $em;
         $this->class                 = $class;
         $this->conn                  = $em->getConnection();
+        $this->annotationReader      = new AnnotationReader();
         $this->platform              = $this->conn->getDatabasePlatform();
         $this->quoteStrategy         = $em->getConfiguration()->getQuoteStrategy();
         $this->identifierFlattener   = new IdentifierFlattener($em->getUnitOfWork(), $em->getMetadataFactory());
@@ -268,17 +276,15 @@ class BasicEntityPersister implements EntityPersister
         $idGenerator    = $this->class->idGenerator;
         $isPostInsertId = $idGenerator->isPostInsertGenerator();
 
-        $stmt       = $this->conn->prepare($this->getInsertSQL());
         $tableName  = $this->class->getTableName();
 
         foreach ($this->queuedInserts as $entity) {
+            $stmt       = $this->conn->prepare($this->getInsertSQL($entity));
             $insertData = $this->prepareInsertData($entity);
 
             if (isset($insertData[$tableName])) {
-                $paramIndex = 1;
-
                 foreach ($insertData[$tableName] as $column => $value) {
-                    $stmt->bindValue($paramIndex++, $value, $this->columnTypes[$column]);
+                    $stmt->bindValue($column, $value, $this->columnTypes[$column]);
                 }
             }
 
@@ -300,9 +306,10 @@ class BasicEntityPersister implements EntityPersister
             if ($this->class->isVersioned) {
                 $this->assignDefaultVersionValue($entity, $id);
             }
+
+            $stmt->closeCursor();
         }
 
-        $stmt->closeCursor();
         $this->queuedInserts = [];
 
         return $postInsertIds;
@@ -343,8 +350,8 @@ class BasicEntityPersister implements EntityPersister
 
         // FIXME: Order with composite keys might not be correct
         $sql = 'SELECT ' . $columnName
-             . ' FROM '  . $tableName
-             . ' WHERE ' . implode(' = ? AND ', $identifier) . ' = ?';
+            . ' FROM '  . $tableName
+            . ' WHERE ' . implode(' = ? AND ', $identifier) . ' = ?';
 
 
         $flatId = $this->identifierFlattener->flattenIdentifier($versionedClass, $id);
@@ -493,8 +500,8 @@ class BasicEntityPersister implements EntityPersister
         }
 
         $sql = 'UPDATE ' . $quotedTableName
-             . ' SET ' . implode(', ', $set)
-             . ' WHERE ' . implode(' = ? AND ', $where) . ' = ?';
+            . ' SET ' . implode(', ', $set)
+            . ' WHERE ' . implode(' = ? AND ', $where) . ' = ?';
 
         $result = $this->conn->executeUpdate($sql, $params, $types);
 
@@ -1288,7 +1295,7 @@ class BasicEntityPersister implements EntityPersister
                     $sourceCol       = $this->quoteStrategy->getJoinColumnName($joinColumn, $this->class, $this->platform);
                     $targetCol       = $this->quoteStrategy->getReferencedJoinColumnName($joinColumn, $this->class, $this->platform);
                     $joinCondition[] = $this->getSQLTableAlias($association['sourceEntity'])
-                                        . '.' . $sourceCol . ' = ' . $tableAlias . '.' . $targetCol;
+                        . '.' . $sourceCol . ' = ' . $tableAlias . '.' . $targetCol;
                 }
 
                 // Add filter SQL
@@ -1388,7 +1395,7 @@ class BasicEntityPersister implements EntityPersister
     /**
      * {@inheritdoc}
      */
-    public function getInsertSQL()
+    public function getInsertSQL($entity = null)
     {
         if ($this->insertSql !== null) {
             return $this->insertSql;
@@ -1400,21 +1407,34 @@ class BasicEntityPersister implements EntityPersister
         if (empty($columns)) {
             $identityColumn  = $this->quoteStrategy->getColumnName($this->class->identifier[0], $this->class, $this->platform);
             $this->insertSql = $this->platform->getEmptyIdentityInsertSQL($tableName, $identityColumn);
-
             return $this->insertSql;
         }
 
         $values  = [];
         $columns = array_unique($columns);
 
+        $insertData = [];
+
+        if($entity !== null) {
+            $insertData = $this->prepareInsertData($entity);
+        }
+
         foreach ($columns as $column) {
-            $placeholder = '?';
+            $placeholder = sprintf(':%s', $column);
 
             if (isset($this->class->fieldNames[$column])
                 && isset($this->columnTypes[$this->class->fieldNames[$column]])
                 && isset($this->class->fieldMappings[$this->class->fieldNames[$column]]['requireSQLConversion'])) {
                 $type        = Type::getType($this->columnTypes[$this->class->fieldNames[$column]]);
                 $placeholder = $type->convertToDatabaseValueSQL('?', $this->platform);
+            }
+
+            $formula = $this->getInsertFormula($column);
+
+            if($formula !== null && !isset($insertData[$tableName][$column])){
+
+                $insertData = $this->prepareInsertData($entity);
+                $placeholder = sprintf('(%s)', $formula->formula);
             }
 
             $values[] = $placeholder;
@@ -1424,8 +1444,16 @@ class BasicEntityPersister implements EntityPersister
         $values  = implode(', ', $values);
 
         $this->insertSql = sprintf('INSERT INTO %s (%s) VALUES (%s)', $tableName, $columns, $values);
-
         return $this->insertSql;
+    }
+
+    /**
+     * @param string $column
+     * @return InsertFormula|null
+     */
+    private function getInsertFormula($column)
+    {
+        return $this->annotationReader->getPropertyAnnotation($this->class->getReflectionProperty($this->class->getFieldForColumn($column)), InsertFormula::class);
     }
 
     /**
@@ -1547,9 +1575,9 @@ class BasicEntityPersister implements EntityPersister
         $lock  = $this->getLockTablesSql($lockMode);
         $where = ($conditionSql ? ' WHERE ' . $conditionSql : '') . ' ';
         $sql = 'SELECT 1 '
-             . $lock
-             . $where
-             . $lockSql;
+            . $lock
+            . $where
+            . $lockSql;
 
         list($params, $types) = $this->expandParameters($criteria);
 
@@ -2001,8 +2029,8 @@ class BasicEntityPersister implements EntityPersister
         $alias = $this->getSQLTableAlias($this->class->name);
 
         $sql = 'SELECT 1 '
-             . $this->getLockTablesSql(null)
-             . ' WHERE ' . $this->getSelectConditionSQL($criteria);
+            . $this->getLockTablesSql(null)
+            . ' WHERE ' . $this->getSelectConditionSQL($criteria);
 
         list($params, $types) = $this->expandParameters($criteria);
 
@@ -2032,9 +2060,9 @@ class BasicEntityPersister implements EntityPersister
     {
         // if one of the join columns is nullable, return left join
         foreach ($joinColumns as $joinColumn) {
-             if ( ! isset($joinColumn['nullable']) || $joinColumn['nullable']) {
-                 return 'LEFT JOIN';
-             }
+            if ( ! isset($joinColumn['nullable']) || $joinColumn['nullable']) {
+                return 'LEFT JOIN';
+            }
         }
 
         return 'INNER JOIN';
