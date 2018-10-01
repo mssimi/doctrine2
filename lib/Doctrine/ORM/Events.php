@@ -164,4 +164,6 @@ final class Events
      * @var string
      */
     const onClear = 'onClear';
+
+    const onFlushTransaction = 'onFlushTransaction';
 }

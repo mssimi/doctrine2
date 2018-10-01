@@ -410,6 +410,8 @@ class UnitOfWork implements PropertyChangedListener
                 }
             }
 
+            $this->dispatchOnFlushTranscationEvent();
+
             $conn->commit();
         } catch (Throwable $e) {
             $this->em->close();
@@ -3393,6 +3395,13 @@ class UnitOfWork implements PropertyChangedListener
     {
         if ($this->evm->hasListeners(Events::postFlush)) {
             $this->evm->dispatchEvent(Events::postFlush, new PostFlushEventArgs($this->em));
+        }
+    }
+
+    private function dispatchOnFlushTranscationEvent()
+    {
+        if ($this->evm->hasListeners(Events::onFlushTransaction)) {
+            $this->evm->dispatchEvent(Events::onFlushTransaction, new OnFlushEventArgs($this->em));
         }
     }
 
