@@ -30,6 +30,7 @@ use Doctrine\ORM\Cache\Persister\CachedPersister;
 use Doctrine\ORM\Event\LifecycleEventArgs;
 use Doctrine\ORM\Event\ListenersInvoker;
 use Doctrine\ORM\Event\OnFlushEventArgs;
+use Doctrine\ORM\Event\OnFlushTransactionEventArgs;
 use Doctrine\ORM\Event\PostFlushEventArgs;
 use Doctrine\ORM\Event\PreFlushEventArgs;
 use Doctrine\ORM\Event\PreUpdateEventArgs;
@@ -3401,7 +3402,7 @@ class UnitOfWork implements PropertyChangedListener
     private function dispatchOnFlushTranscationEvent()
     {
         if ($this->evm->hasListeners(Events::onFlushTransaction)) {
-            $this->evm->dispatchEvent(Events::onFlushTransaction, new OnFlushEventArgs($this->em));
+            $this->evm->dispatchEvent(Events::onFlushTransaction, new OnFlushTransactionEventArgs($this->em));
         }
     }
 
